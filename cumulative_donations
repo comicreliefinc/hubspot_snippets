@@ -1,0 +1,88 @@
+/* NOTES 
+
+The purpose of this code is to calculate the total amount donated by a Contact in a given year and
+it is in one of the payment Pipelines: "Fundraise Up", "Offline & Platforms", or "Historical Import";
+and if it's in "Fundraise Up" the Deal Stage is "Succeeded". In the future we may want to rerun this 
+based on the deal stage of the other pipelines.
+
+This custom code assumes the following: 
+- Node.js 20.x
+- HubSpot Client v11 
+- 'contactRecordId' = Record ID = the record ID of the contact currently in the workflow is passed in
+
+*/
+
+const hubspot = require('@hubspot/api-client');
+
+exports.main = async (event, callback) => {
+  const hubspotClient = new hubspot.Client({ accessToken: process.env.TOKEN});
+  const contactRecordId = event.inputFields['contactRecordId'];
+  const year = event.inputFields['year']; 
+  const pipeline = ['56912245','95892514','99120292'];
+  const dealStage = '113328272';
+  const year = '2022'; // set the year
+
+  try{
+    // Fetch all deals from the contact
+    const allDeals = await hubspotClient.crm.associations.v4.basicApi.getPage('contact', contactRecordId, 'deal'); 
+	  
+    // Fetch deal details 
+    const allDealIds = allDeals.results.map(item => item.toObjectId);
+    const dealPromises = allDealIds.map(dealId =>
+      hubspotClient.crm.deals.basicApi.getById(dealId, ['amount', 'closedate', 'pipeline', 'dealstage'])
+    );
+
+    // Wait for the it...
+    const deals = await Promise.all(dealPromises);
+    
+    // Make the data a little easier to filter
+    const dealsToFilter = [];
+    deals.forEach(deal => {
+      const eachDeal = {
+        id: deal.id,
+        amount: deal.properties.amount,
+        closedate: deal.properties.closedate,
+        pipeline: deal.properties.pipeline,
+        dealstage: deal.properties.dealstage
+      };
+      dealsToFilter.push(eachDeal);
+    });
+  
+  // Filter the deals
+  const filteredDeals = dealsToFilter
+    .filter(deal => {
+        const dealDateRaw = new Date(deal.closedate);
+		    const dealDate = addHoursToDate(dealDateRaw, -5); // get the dates in the timezone we have our account set to
+        const dateMatches = dealDate.getFullYear() == year;  
+        const dealStageMatches = deal.dealstage == dealStage;
+        const dealPipeline = pipeline.includes(deal.pipeline);
+        return dateMatches && (dealStageMatches || dealPipeline);
+    });
+
+    // Sum the donation amount
+    const totalDonations = filteredDeals.reduce((totalAmount, deal) => totalAmount + Number(deal.amount), 0);
+    
+    callback({
+      outputFields: {
+        totalDonations: totalDonations
+      }
+    });
+  } catch (error){
+    console.error(error);
+    callback({
+      error: error.message
+    });
+  }	
+
+}
+
+function addHoursToDate(inputDate, hoursToAdd) {
+  if (inputDate instanceof Date && !isNaN(inputDate.getTime())) {
+    inputDate.setHours(inputDate.getHours() + hoursToAdd);
+    return inputDate;
+  } else {
+    console.error('Invalid date');
+    return null;
+  }
+}
+
